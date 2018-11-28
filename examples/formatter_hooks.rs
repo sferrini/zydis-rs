@@ -4,10 +4,9 @@
 
 extern crate zydis;
 
-use std::{any::Any, ffi::CString, fmt::Write, mem};
+use std::{fmt::Write, mem, ptr};
 
-use zydis::check;
-use zydis::*;
+use zydis::{check, *};
 
 #[rustfmt::skip]
 static CODE: &'static [u8] = &[
@@ -31,91 +30,83 @@ fn user_err<T>(_: T) -> Status {
 }
 
 struct UserData {
-    orig_print_mnemonic: Hook,
-    orig_format_operand: Hook,
+    orig_print_mnemonic: FormatterFunc,
+    orig_format_operand: FormatterFunc,
     omit_immediate: bool,
 }
 
-fn print_mnemonic(
-    formatter: &Formatter,
-    buffer: &mut FormatterBuffer,
-    ctx: &mut FormatterContext,
-    user_data: Option<&mut dyn Any>,
-) -> Result<()> {
-    let instruction = unsafe { &*ctx.instruction };
-    match user_data.and_then(|x| x.downcast_mut::<UserData>()) {
-        Some(&mut UserData {
-            ref mut omit_immediate,
-            orig_print_mnemonic: Hook::PrintMnemonic(Some(orig_print_mnemonic)),
-            ..
-        }) => {
-            *omit_immediate = true;
+unsafe extern "C" fn print_mnemonic(
+    formatter: *const Formatter,
+    buffer: *mut FormatterBuffer,
+    ctx: *mut FormatterContext,
+) -> Status {
+    let f = move || {
+        let buffer = &mut *buffer;
+        let ctx = &mut *ctx;
+        let usr = &mut *(ctx.user_data as *mut UserData);
 
-            let count = instruction.operand_count as usize;
+        let instruction = &*ctx.instruction;
 
-            if count > 0 && instruction.operands[count - 1].ty == OperandType::Immediate {
-                let cc = instruction.operands[count - 1].imm.value as usize;
+        usr.omit_immediate = true;
 
-                match instruction.mnemonic {
-                    Mnemonic::CMPPS if cc < 8 => {
-                        buffer.append(TOKEN_MNEMONIC)?;
-                        let string = buffer.get_string()?;
-                        return write!(string, "cmp{}ps", CONDITION_CODES[cc]).map_err(user_err);
-                    }
-                    Mnemonic::CMPPD if cc < 8 => {
-                        buffer.append(TOKEN_MNEMONIC)?;
-                        let string = buffer.get_string()?;
-                        return write!(string, "cmp{}pd", CONDITION_CODES[cc]).map_err(user_err);
-                    }
-                    Mnemonic::VCMPPS if cc < 0x20 => {
-                        buffer.append(TOKEN_MNEMONIC)?;
-                        let string = buffer.get_string()?;
-                        return write!(string, "vcmp{}ps", CONDITION_CODES[cc]).map_err(user_err);
-                    }
-                    Mnemonic::VCMPPD if cc < 0x20 => {
-                        buffer.append(TOKEN_MNEMONIC)?;
-                        let string = buffer.get_string()?;
-                        return write!(string, "vcmp{}pd", CONDITION_CODES[cc]).map_err(user_err);
-                    }
-                    _ => {}
+        let count = instruction.operand_count as usize;
+
+        if count > 0 && instruction.operands[count - 1].ty == OperandType::Immediate {
+            let cc = instruction.operands[count - 1].imm.value as usize;
+
+            match instruction.mnemonic {
+                Mnemonic::CMPPS if cc < 8 => {
+                    buffer.append(TOKEN_MNEMONIC)?;
+                    let string = buffer.get_string()?;
+                    return write!(string, "cmp{}ps", CONDITION_CODES[cc]).map_err(user_err);
                 }
+                Mnemonic::CMPPD if cc < 8 => {
+                    buffer.append(TOKEN_MNEMONIC)?;
+                    let string = buffer.get_string()?;
+                    return write!(string, "cmp{}pd", CONDITION_CODES[cc]).map_err(user_err);
+                }
+                Mnemonic::VCMPPS if cc < 0x20 => {
+                    buffer.append(TOKEN_MNEMONIC)?;
+                    let string = buffer.get_string()?;
+                    return write!(string, "vcmp{}ps", CONDITION_CODES[cc]).map_err(user_err);
+                }
+                Mnemonic::VCMPPD if cc < 0x20 => {
+                    buffer.append(TOKEN_MNEMONIC)?;
+                    let string = buffer.get_string()?;
+                    return write!(string, "vcmp{}pd", CONDITION_CODES[cc]).map_err(user_err);
+                }
+                _ => {}
             }
-
-            *omit_immediate = false;
-            unsafe { check!(orig_print_mnemonic(mem::transmute(formatter), buffer, ctx)) }
         }
-        _ => Ok(()),
+
+        usr.omit_immediate = false;
+        check!((usr.orig_print_mnemonic.unwrap())(
+            mem::transmute(formatter),
+            buffer,
+            ctx
+        ))
+    };
+
+    match f() {
+        Ok(_) => Status::Success,
+        Err(e) => e,
     }
 }
 
-fn format_operand_imm(
-    formatter: &Formatter,
-    buffer: &mut FormatterBuffer,
-    ctx: &mut FormatterContext,
-    user_data: Option<&mut dyn Any>,
-) -> Result<()> {
-    match user_data {
-        Some(x) => match x.downcast_ref::<UserData>() {
-            Some(&UserData {
-                omit_immediate,
-                orig_format_operand: Hook::FormatOperandImm(Some(orig_format_operand)),
-                ..
-            }) => {
-                if omit_immediate {
-                    Err(Status::SkipToken)
-                } else {
-                    unsafe { check!(orig_format_operand(mem::transmute(formatter), buffer, ctx)) }
-                }
-            }
-            _ => Ok(()),
-        },
-        _ => Ok(()),
+unsafe extern "C" fn format_operand_imm(
+    formatter: *const Formatter,
+    buffer: *mut FormatterBuffer,
+    ctx: *mut FormatterContext,
+) -> Status {
+    let usr = &*((*ctx).user_data as *const UserData);
+    if usr.omit_immediate {
+        Status::SkipToken
+    } else {
+        (usr.orig_format_operand.unwrap())(formatter, buffer, ctx)
     }
 }
 
 fn main() -> Result<()> {
-    let s = CString::new("h").unwrap();
-
     let mut formatter = Formatter::new(FormatterStyle::Intel)?;
     formatter.set_property(FormatterProperty::ForceSegment(true))?;
     formatter.set_property(FormatterProperty::ForceSize(true))?;
@@ -123,7 +114,7 @@ fn main() -> Result<()> {
     // clear old prefix
     formatter.set_property(FormatterProperty::HexPrefix(None))?;
     // set h as suffix
-    formatter.set_property(FormatterProperty::HexSuffix(Some(s.as_c_str())))?;
+    formatter.set_property(FormatterProperty::HexSuffix(Some("h")))?;
 
     let decoder = Decoder::new(MachineMode::Long64, AddressWidth::_64)?;
 
@@ -132,15 +123,27 @@ fn main() -> Result<()> {
 
     // First without hooks
     for (instruction, ip) in decoder.instruction_iterator(CODE, 0) {
-        formatter.format_instruction(&instruction, &mut buffer, Some(ip), None)?;
+        formatter.format_instruction(&instruction, &mut buffer, Some(ip), ptr::null_mut())?;
         println!("0x{:016X} {}", ip, buffer);
     }
 
     println!();
 
     // Now set the hooks
-    let orig_print_mnemonic = formatter.set_print_mnemonic(Box::new(print_mnemonic))?;
-    let orig_format_operand = formatter.set_format_operand_imm(Box::new(format_operand_imm))?;
+    let orig_print_mnemonic = if let Hook::PrintMnemonic(o) =
+        formatter.set_hook(Hook::PrintMnemonic(Some(print_mnemonic)))?
+    {
+        o
+    } else {
+        unreachable!()
+    };
+    let orig_format_operand = if let Hook::FormatOperandImm(o) =
+        formatter.set_hook(Hook::FormatOperandImm(Some(format_operand_imm)))?
+    {
+        o
+    } else {
+        unreachable!()
+    };
 
     let mut user_data = UserData {
         orig_print_mnemonic,
@@ -150,7 +153,12 @@ fn main() -> Result<()> {
 
     // And print it with hooks
     for (instruction, ip) in decoder.instruction_iterator(CODE, 0) {
-        formatter.format_instruction(&instruction, &mut buffer, Some(ip), Some(&mut user_data))?;
+        formatter.format_instruction(
+            &instruction,
+            &mut buffer,
+            Some(ip),
+            &mut user_data as *mut UserData as *mut _,
+        )?;
         println!("0x{:016X} {}", ip, buffer);
     }
 

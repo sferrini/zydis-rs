@@ -1,5 +1,7 @@
 extern crate zydis;
 
+use std::ptr;
+
 use zydis::*;
 
 #[rustfmt::skip]
@@ -16,9 +18,12 @@ fn main() -> Result<()> {
     let mut buffer = [0u8; 256];
 
     for (instruction, ip) in decoder.instruction_iterator(CODE, 0) {
-        for (ty, val) in
-            formatter.tokenize_instruction(&instruction, &mut buffer[..], Some(ip), None)?
-        {
+        for (ty, val) in formatter.tokenize_instruction(
+            &instruction,
+            &mut buffer[..],
+            Some(ip),
+            ptr::null_mut(),
+        )? {
             println!("token type: {}, value: {}", ty, val);
         }
         println!("----");

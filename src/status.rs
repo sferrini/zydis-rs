@@ -2,8 +2,6 @@
 
 use core::{fmt, result};
 
-use std::error;
-
 /// A convenience alias for a Result, holding either a value or a status.
 pub type Result<T> = result::Result<T, Status>;
 
@@ -156,17 +154,6 @@ impl fmt::Display for Status {
     }
 }
 
-impl error::Error for Status {
-    fn cause(&self) -> Option<&dyn error::Error> {
-        None
-    }
-
-    fn description(&self) -> &str {
-        // Call method not defined in this trait.
-        Self::description(*self)
-    }
-}
-
 #[macro_export]
 macro_rules! check {
     ($expression:expr) => {
@@ -193,11 +180,9 @@ macro_rules! check_option {
 
 macro_rules! check_string {
     ($expression:expr) => {{
-        use std::ffi::CStr;
-
         match $expression {
             x if x.is_null() => None,
-            x => Some(CStr::from_ptr(x).to_str().unwrap()),
+            x => $crate::ffi::str_from_c_str(x).ok(),
         }
     }};
 }

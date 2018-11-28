@@ -1,38 +1,31 @@
 //! Provides type aliases, struct definitions and the unsafe function
 //! declrations.
 
-use core::{fmt, marker::PhantomData, mem, slice};
+use core::{ffi::c_void, fmt, marker::PhantomData, mem, ptr, slice, str};
 
-// TODO: use libc maybe, or wait for this to move into core?
-use std::{
-    ffi::CStr,
-    os::raw::{c_char, c_void},
-};
-
-use super::{
+use crate::{
     enums::*,
+    formatter::Formatter,
     status::{Result, Status},
 };
 
-#[rustfmt::skip]
-pub type FormatterFunc = Option<unsafe extern "C" fn(
-    *const ZydisFormatter,
-    *mut FormatterBuffer,
-    *mut FormatterContext) -> Status>;
+#[allow(non_camel_case_types)]
+type c_char = u8;
 
-#[rustfmt::skip]
-pub type FormatterDecoratorFunc = Option<unsafe extern "C" fn(
-    *const ZydisFormatter,
-    *mut FormatterBuffer,
-    *mut FormatterContext,
-    Decorator) -> Status>;
+unsafe fn strlen(mut p: *const c_char) -> usize {
+    let mut len = 0;
 
-#[rustfmt::skip]
-pub type FormatterRegisterFunc = Option<unsafe extern "C" fn(
-    *const ZydisFormatter,
-    *mut FormatterBuffer,
-    *mut FormatterContext,
-    Register) -> Status>;
+    while *p != b'\0' {
+        p = p.offset(1);
+        len += 1;
+    }
+
+    len
+}
+
+pub(crate) unsafe fn str_from_c_str<'a>(p: *const c_char) -> Result<&'a str> {
+    str::from_utf8(slice::from_raw_parts(p, strlen(p))).map_err(|_| Status::NotUTF8)
+}
 
 pub type RegisterWidth = u16;
 
@@ -53,11 +46,7 @@ impl<'a> FormatterToken<'a> {
             let mut val = mem::uninitialized();
             check!(ZydisFormatterTokenGetValue(self, &mut ty, &mut val))?;
 
-            let val = CStr::from_ptr(val as *const i8)
-                .to_str()
-                .map_err(|_| Status::NotUTF8)?;
-
-            Ok((ty, val))
+            Ok((ty, str_from_c_str(val)?))
         }
     }
 
@@ -177,11 +166,7 @@ impl ZyanString {
     pub fn new_ptr(buffer: *mut u8, capacity: usize) -> Result<Self> {
         unsafe {
             let mut string = mem::uninitialized();
-            check!(ZyanStringInitCustomBuffer(
-                &mut string,
-                buffer as *mut i8,
-                capacity
-            ))?;
+            check!(ZyanStringInitCustomBuffer(&mut string, buffer, capacity))?;
             Ok(string)
         }
     }
@@ -220,7 +205,7 @@ impl ZyanStringView {
             let mut view = mem::uninitialized();
             check!(ZyanStringViewInsideBufferEx(
                 &mut view,
-                buffer.as_ptr() as *const i8,
+                buffer.as_ptr(),
                 buffer.len()
             ))?;
             Ok(view)
@@ -739,60 +724,26 @@ pub struct Prefix {
 
 #[derive(Debug)]
 #[repr(C)]
-pub struct ZydisFormatter {
-    style: FormatterStyle,
-    force_memory_size: bool,
-    force_memory_segment: bool,
-    force_relative_branches: bool,
-    force_relative_riprel: bool,
-    print_branch_size: bool,
-    detailed_prefixes: bool,
-    addr_base: NumericBase,
-    addr_signedness: Signedness,
-    addr_padding_absolute: Padding,
-    addr_padding_relative: Padding,
-    disp_base: NumericBase,
-    disp_signedness: Signedness,
-    disp_padding: Padding,
-    imm_base: NumericBase,
-    imm_signedness: Signedness,
-    imm_padding: Padding,
-    case_prefixes: i32,
-    case_mnemonic: i32,
-    case_registers: i32,
-    case_typecasts: i32,
-    case_decorators: i32,
-    hex_uppercase: bool,
-    // ZYDIS_NUMERIC_BASE_MAX_VALUE + 1
-    number_format: [[ZydisFormatterStringData; 2]; 2],
-
-    func_pre_instruction: FormatterFunc,
-    func_post_instruction: FormatterFunc,
-    func_format_instruction: FormatterFunc,
-    func_pre_operand: FormatterFunc,
-    func_post_operand: FormatterFunc,
-    func_format_operand_reg: FormatterFunc,
-    func_format_operand_mem: FormatterFunc,
-    func_format_operand_ptr: FormatterFunc,
-    func_format_operand_imm: FormatterFunc,
-    func_print_mnemonic: FormatterFunc,
-    func_print_register: FormatterRegisterFunc,
-    func_print_address_abs: FormatterFunc,
-    func_print_address_rel: FormatterFunc,
-    func_print_disp: FormatterFunc,
-    func_print_imm: FormatterFunc,
-    func_print_typecast: FormatterFunc,
-    func_print_segment: FormatterFunc,
-    func_print_prefixes: FormatterFunc,
-    func_print_decorator: FormatterDecoratorFunc,
-}
-
-#[derive(Debug)]
-#[repr(C)]
-struct ZydisFormatterStringData {
+pub(crate) struct ZydisFormatterStringData {
     string: *const ZyanStringView,
     string_data: ZyanStringView,
     buffer: [c_char; 11],
+}
+
+impl ZydisFormatterStringData {
+    pub fn set_data(&mut self, s: &str) {
+        if s == "" {
+            self.string = ptr::null();
+            return;
+        }
+
+        let s = s.as_bytes();
+
+        self.string = &self.string_data;
+        self.string_data.string.vector.data = s.as_ptr() as *mut _;
+        // Zydis does a - 1 since they expect null termination.
+        self.string_data.string.vector.size = s.len() + 1;
+    }
 }
 
 #[derive(Debug)]
@@ -945,22 +896,22 @@ extern "C" {
 
     pub fn ZydisISAExtGetString(isa_ext: ISAExt) -> *const c_char;
 
-    pub fn ZydisFormatterInit(formatter: *mut ZydisFormatter, style: FormatterStyle) -> Status;
+    pub fn ZydisFormatterInit(formatter: *mut Formatter, style: FormatterStyle) -> Status;
 
     pub fn ZydisFormatterSetProperty(
-        formatter: *mut ZydisFormatter,
+        formatter: *mut Formatter,
         property: ZydisFormatterProperty,
         value: usize,
     ) -> Status;
 
     pub fn ZydisFormatterSetHook(
-        formatter: *mut ZydisFormatter,
+        formatter: *mut Formatter,
         hook: HookType,
         callback: *mut *const c_void,
     ) -> Status;
 
     pub fn ZydisFormatterFormatInstruction(
-        formatter: *const ZydisFormatter,
+        formatter: *const Formatter,
         instruction: *const DecodedInstruction,
         buffer: *mut c_char,
         buffer_length: usize,
@@ -968,7 +919,7 @@ extern "C" {
     ) -> Status;
 
     pub fn ZydisFormatterFormatInstructionEx(
-        formatter: *const ZydisFormatter,
+        formatter: *const Formatter,
         instruction: *const DecodedInstruction,
         buffer: *mut c_char,
         buffer_length: usize,
@@ -977,7 +928,7 @@ extern "C" {
     ) -> Status;
 
     pub fn ZydisFormatterFormatOperand(
-        formatter: *const ZydisFormatter,
+        formatter: *const Formatter,
         instruction: *const DecodedInstruction,
         operand_index: u8,
         buffer: *mut c_char,
@@ -986,7 +937,7 @@ extern "C" {
     ) -> Status;
 
     pub fn ZydisFormatterFormatOperandEx(
-        formatter: *const ZydisFormatter,
+        formatter: *const Formatter,
         instruction: *const DecodedInstruction,
         operand_index: u8,
         buffer: *mut c_char,
@@ -996,7 +947,7 @@ extern "C" {
     ) -> Status;
 
     pub fn ZydisFormatterTokenizeInstruction(
-        formatter: *const ZydisFormatter,
+        formatter: *const Formatter,
         instruction: *const DecodedInstruction,
         buffer: *mut c_void,
         length: usize,
@@ -1005,7 +956,7 @@ extern "C" {
     ) -> Status;
 
     pub fn ZydisFormatterTokenizeInstructionEx(
-        formatter: *const ZydisFormatter,
+        formatter: *const Formatter,
         instruction: *const DecodedInstruction,
         buffer: *mut c_void,
         length: usize,
@@ -1015,7 +966,7 @@ extern "C" {
     ) -> Status;
 
     pub fn ZydisFormatterTokenizeOperand(
-        formatter: *const ZydisFormatter,
+        formatter: *const Formatter,
         instruction: *const DecodedInstruction,
         index: u8,
         buffer: *mut c_void,
@@ -1025,14 +976,14 @@ extern "C" {
     ) -> Status;
 
     pub fn ZydisFormatterTokenizeOperandEx(
-        formatter: *const ZydisFormatter,
+        formatter: *const Formatter,
         instruction: *const DecodedInstruction,
         index: u8,
         buffer: *mut c_void,
         length: usize,
         runtime_address: u64,
         token: *mut *const FormatterToken,
-        user_data: *mut c_void
+        user_data: *mut c_void,
     ) -> Status;
 
     pub fn ZydisFormatterTokenGetValue(

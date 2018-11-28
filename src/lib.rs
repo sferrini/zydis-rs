@@ -1,8 +1,7 @@
 //! The official Rust bindings for the Zyan Disassembler Engine.
 
 #![deny(bare_trait_objects)]
-
-extern crate core;
+#![no_std]
 
 extern crate bitflags;
 
@@ -38,7 +37,7 @@ pub use ffi::{
     FormatterToken, InstructionIterator,
 };
 pub use formatter::{
-    Formatter, FormatterProperty, Hook, OutputBuffer, WrappedDecoratorFunc, WrappedGeneralFunc,
-    WrappedRegisterFunc,
+    Formatter, FormatterDecoratorFunc, FormatterFunc, FormatterProperty, FormatterRegisterFunc,
+    Hook, OutputBuffer,
 };
 pub use status::{Result, Status};

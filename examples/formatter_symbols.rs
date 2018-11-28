@@ -1,12 +1,12 @@
 extern crate zydis;
 
 use zydis::{
-    check, ffi, AddressWidth, Decoder, Formatter, FormatterBuffer, FormatterContext,
+    check, AddressWidth, Decoder, Formatter, FormatterBuffer, FormatterContext, FormatterFunc,
     FormatterProperty, FormatterStyle, Hook, MachineMode, OutputBuffer, Result as ZydisResult,
     Status, TOKEN_SYMBOL,
 };
 
-use std::{any::Any, fmt::Write, mem};
+use std::{fmt::Write, mem};
 
 #[rustfmt::skip]
 const CODE: &'static [u8] = &[
@@ -24,29 +24,35 @@ const SYMBOL_TABLE: &'static [(u64, &'static str)] = &[
     (0x007FFFFFFF401100, "SomeModule.SomeFunction"),
 ];
 
-fn print_address(
-    formatter: &Formatter,
-    buffer: &mut FormatterBuffer,
-    context: &mut FormatterContext,
-    user_data: Option<&mut dyn Any>,
-) -> ZydisResult<()> {
-    let addr = unsafe {
-        (*context.instruction).calc_absolute_address(context.runtime_address, &*context.operand)
-    }?;
+unsafe extern "C" fn print_address(
+    formatter: *const Formatter,
+    buffer: *mut FormatterBuffer,
+    context: *mut FormatterContext,
+) -> Status {
+    let f = move || {
+        let buffer = &mut *buffer;
+        let context = &mut *context;
 
-    match SYMBOL_TABLE.iter().find(|&&(x, _)| x == addr) {
-        Some((_, symbol)) => {
-            buffer.append(TOKEN_SYMBOL)?;
-            write!(buffer.get_string()?, "<{}>", symbol).map_err(|_| Status::User)
+        let addr = (*context.instruction)
+            .calc_absolute_address(context.runtime_address, &*context.operand)?;
+
+        match SYMBOL_TABLE.iter().find(|&&(x, _)| x == addr) {
+            Some((_, symbol)) => {
+                buffer.append(TOKEN_SYMBOL)?;
+                write!(buffer.get_string()?, "<{}>", symbol).map_err(|_| Status::User)
+            }
+            None => check!(
+                (mem::transmute::<_, FormatterFunc>(context.user_data).unwrap())(
+                    formatter, buffer, context,
+                ),
+                ()
+            ),
         }
-        None => unsafe {
-            check!((user_data
-                .and_then(|x| x.downcast_ref::<ffi::FormatterFunc>())
-                .unwrap()
-                .unwrap())(
-                mem::transmute(formatter), buffer, context
-            ))
-        },
+    };
+
+    match f() {
+        Ok(_) => Status::Success,
+        Err(e) => e,
     }
 }
 
@@ -58,7 +64,7 @@ fn main() -> ZydisResult<()> {
     formatter.set_property(FormatterProperty::ForceSize(true))?;
 
     let mut orig_print_address = if let Hook::PrintAddressAbs(x) =
-        formatter.set_print_address_abs(Box::new(print_address))?
+        formatter.set_hook(Hook::PrintAddressAbs(Some(print_address)))?
     {
         x
     } else {
@@ -71,12 +77,9 @@ fn main() -> ZydisResult<()> {
     let mut buffer = OutputBuffer::new(&mut buffer[..]);
 
     for (instruction, ip) in decoder.instruction_iterator(CODE, runtime_address) {
-        formatter.format_instruction(
-            &instruction,
-            &mut buffer,
-            Some(ip),
-            Some(&mut orig_print_address),
-        )?;
+        formatter.format_instruction(&instruction, &mut buffer, Some(ip), unsafe {
+            mem::transmute(&mut orig_print_address)
+        })?;
 
         println!("0x{:016X} {}", ip, buffer);
     }

@@ -1,5 +1,7 @@
 extern crate zydis;
 
+use std::ptr;
+
 use zydis::*;
 
 #[rustfmt::skip]
@@ -26,11 +28,11 @@ fn main() -> Result<()> {
         // We use Some(ip) here since we want absolute addressing based on the given
         // `ip`. If we would want to have relative addressing, we would use
         // `None` instead.
-        formatter.format_instruction(&instruction, &mut buffer, Some(ip), None)?;
+        formatter.format_instruction(&instruction, &mut buffer, Some(ip), ptr::null_mut())?;
         println!("absolute: 0x{:016X} {}", ip, buffer);
 
         // Show relative format as well
-        formatter.format_instruction(&instruction, &mut buffer, None, None)?;
+        formatter.format_instruction(&instruction, &mut buffer, None, ptr::null_mut())?;
         println!("relative:                    {}", buffer);
     }
 
