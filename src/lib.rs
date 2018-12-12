@@ -1,9 +1,12 @@
 //! The official Rust bindings for the Zyan Disassembler Engine.
 
 #![deny(bare_trait_objects)]
-#![no_std]
+#![cfg_attr(not(feature = "use_libc"), no_std)]
 
 extern crate bitflags;
+
+#[cfg(feature = "use_libc")]
+extern crate core;
 
 #[cfg(feature = "serialization")]
 extern crate serde;

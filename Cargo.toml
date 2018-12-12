@@ -20,5 +20,7 @@ serde = { version = "1.0", optional = true}
 serde_derive = { version = "1.0", optional = true}
 
 [features]
-default = []
+default = ["use_libc"]
 serialization = ["serde", "serde_derive"]
+use_libc = []
+

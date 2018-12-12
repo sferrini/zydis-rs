@@ -4,11 +4,11 @@ use std::env;
 
 /// Determine the CMAKE_BUILD_TYPE profile that will be used given the current
 /// build options.
-/// 
+///
 /// Note: this implementation comes from the `cmake-rs` crate and should stay
 /// in sync.
 ///
-/// Via that project: the profile is automatically inferred from Rust's 
+/// Via that project: the profile is automatically inferred from Rust's
 /// compilation profile as follows:
 ///
 /// * if `opt-level=0` then `CMAKE_BUILD_TYPE=Debug`,
@@ -85,6 +85,10 @@ fn build_library() {
         .define("ZYDIS_BUILD_EXAMPLES", "OFF")
         .define("ZYDIS_BUILD_TOOLS", "OFF");
 
+    if env::var("CARGO_FEATURE_USE_LIBC").is_err() {
+        config.define("ZYAN_NO_LIBC", "ON");
+    }
+
     let dst = config.build();
 
     let target = env::var("TARGET").unwrap_or("(unknown)".to_string());
@@ -95,7 +99,8 @@ fn build_library() {
     println!(
         "cargo:rustc-link-search=native={}/build/{}",
         dst.display(),
-        relative_build_dir);
+        relative_build_dir
+    );
     println!(
         "cargo:rustc-link-search=native={}/build/dependencies/zycore/{}",
         dst.display(),
